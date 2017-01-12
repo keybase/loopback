@@ -126,6 +126,10 @@ func (h *Handle) Read(ctx context.Context,
 		log.Printf("Handle(%s).Read(): error=%v",
 			h.f.Name(), err)
 	}()
+
+	if _, err = h.f.Seek(req.Offset, 0); err != nil {
+		return err
+	}
 	resp.Data = make([]byte, req.Size)
 	n, err := h.f.Read(resp.Data)
 	resp.Data = resp.Data[:n]
