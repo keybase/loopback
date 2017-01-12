@@ -9,7 +9,6 @@ package main
 import (
 	"io/ioutil"
 	"log"
-	"math/rand"
 	"os"
 	"path/filepath"
 	"sync"
@@ -31,37 +30,6 @@ type FS struct {
 
 	lock    sync.Mutex
 	handles map[fuse.HandleID]*Handle
-}
-
-func (f *FS) newHandle(h *Handle) fuse.HandleID {
-	f.lock.Lock()
-	defer f.lock.Unlock()
-
-	if f.handles == nil {
-		f.handles = make(map[fuse.HandleID]*Handle)
-	}
-
-	hid := fuse.HandleID(rand.Int63())
-	for f.handles[hid] != nil {
-		hid = fuse.HandleID(rand.Int63())
-	}
-	f.handles[hid] = h
-
-	return hid
-}
-
-func (f *FS) forgetHandle(hid fuse.HandleID) {
-	f.lock.Lock()
-	defer f.lock.Unlock()
-
-	delete(f.handles, hid)
-}
-
-func (f *FS) getHandle(hid fuse.HandleID) *Handle {
-	f.lock.Lock()
-	defer f.lock.Unlock()
-
-	return f.handles[hid]
 }
 
 // Root implements fs.FS interface for *FS
@@ -94,8 +62,9 @@ func (f *FS) Statfs(ctx context.Context,
 
 // Handle represent an open file or directory
 type Handle struct {
-	fs       *FS
-	reopener func() (*os.File, error)
+	fs        *FS
+	reopener  func() (*os.File, error)
+	forgetter func()
 
 	f *os.File
 }
@@ -172,7 +141,9 @@ func (h *Handle) Release(ctx context.Context,
 		log.Printf("Handle(%s).Release(): error=%v",
 			h.f.Name(), err)
 	}()
-	h.fs.forgetHandle(req.Handle)
+	if h.forgetter != nil {
+		h.forgetter()
+	}
 	return h.f.Close()
 }
 
@@ -200,6 +171,9 @@ type Node struct {
 
 	realPath string
 	isDir    bool
+
+	lock     sync.RWMutex
+	flushers map[*Handle]bool
 }
 
 var _ fs.NodeAccesser = (*Node)(nil)
@@ -311,6 +285,27 @@ func fuseOpenFlagsToOSFlagsAndPerms(
 	return flag, perm
 }
 
+func (n *Node) rememberHandle(h *Handle) {
+	n.lock.Lock()
+	defer n.lock.Unlock()
+	if n.flushers == nil {
+		n.flushers = make(map[*Handle]bool)
+	}
+	n.flushers[h] = true
+}
+
+func (n *Node) forgetHandle(h *Handle) {
+	n.lock.Lock()
+	defer n.lock.Unlock()
+	if n.flushers == nil {
+		return
+	}
+	if !n.flushers[h] {
+		return
+	}
+	delete(n.flushers, h)
+}
+
 var _ fs.NodeOpener = (*Node)(nil)
 
 // Open implements fs.NodeOpener interface for *Node
@@ -332,7 +327,10 @@ func (n *Node) Open(ctx context.Context,
 	}
 
 	handle := &Handle{fs: n.fs, f: f, reopener: opener}
-	resp.Handle = n.fs.newHandle(handle)
+	n.rememberHandle(handle)
+	handle.forgetter = func() {
+		n.forgetHandle(handle)
+	}
 	return handle, nil
 }
 
@@ -360,9 +358,15 @@ func (n *Node) Create(
 
 	h := &Handle{fs: n.fs, f: f, reopener: opener}
 
-	node := &Node{realPath: filepath.Join(n.realPath, req.Name),
-		isDir: req.Mode.IsDir(), fs: n.fs}
-	resp.Handle = n.fs.newHandle(h)
+	node := &Node{
+		realPath: filepath.Join(n.realPath, req.Name),
+		isDir:    req.Mode.IsDir(),
+		fs:       n.fs,
+	}
+	node.rememberHandle(h)
+	h.forgetter = func() {
+		node.forgetHandle(h)
+	}
 	return node, h, nil
 }
 
@@ -393,7 +397,12 @@ var _ fs.NodeFsyncer = (*Node)(nil)
 // Fsync implements fs.NodeFsyncer interface for *Node
 func (n *Node) Fsync(ctx context.Context, req *fuse.FsyncRequest) (err error) {
 	defer func() { log.Printf("%s.Fsync(): error=%v", n.realPath, err) }()
-	return n.fs.getHandle(req.Handle).f.Sync()
+	n.lock.RLock()
+	defer n.lock.RUnlock()
+	for h := range n.flushers {
+		return h.f.Sync()
+	}
+	return fuse.EIO
 }
 
 var _ fs.NodeSetattrer = (*Node)(nil)
