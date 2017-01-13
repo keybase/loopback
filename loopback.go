@@ -304,9 +304,6 @@ func (n *Node) forgetHandle(h *Handle) {
 	if n.flushers == nil {
 		return
 	}
-	if !n.flushers[h] {
-		return
-	}
 	delete(n.flushers, h)
 }
 
