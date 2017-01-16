@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"time"
 
 	"bazil.org/fuse"
 	"bazil.org/fuse/fs"
@@ -18,12 +19,17 @@ import (
 
 var (
 	inMemoryXattr bool
+	latency       time.Duration
+
+	latencyStr string
 )
 
 func init() {
 	flag.BoolVar(&inMemoryXattr, "in-memory-xattr", false,
 		"use an in-memory implementation for xattr. Otherwise,\n"+
 			"fall back to the ._ file approach provided by osxfuse.")
+	flag.StringVar(&latencyStr, "latency", "0s",
+		"add an artificial latency to every fuse handler on every call")
 }
 
 func usage() {
@@ -35,6 +41,13 @@ func usage() {
 func main() {
 	flag.Usage = usage
 	flag.Parse()
+
+	var err error
+	if latency, err = time.ParseDuration(latencyStr); err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		usage()
+		os.Exit(2)
+	}
 
 	if flag.NArg() != 2 {
 		usage()

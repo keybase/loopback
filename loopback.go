@@ -48,6 +48,7 @@ func newFS(rootPath string) *FS {
 
 // Root implements fs.FS interface for *FS
 func (f *FS) Root() (n fs.Node, err error) {
+	time.Sleep(latency)
 	defer func() { log.Printf("FS.Root(): %#+v error=%v", n, err) }()
 	return &Node{realPath: f.rootPath, isDir: true, fs: f}, nil
 }
@@ -57,6 +58,7 @@ var _ fs.FSStatfser = (*FS)(nil)
 // Statfs implements fs.FSStatfser interface for *FS
 func (f *FS) Statfs(ctx context.Context,
 	req *fuse.StatfsRequest, resp *fuse.StatfsResponse) (err error) {
+	time.Sleep(latency)
 	defer func() { log.Printf("FS.Statfs(): error=%v", err) }()
 	var stat syscall.Statfs_t
 	if err := syscall.Statfs(f.rootPath, &stat); err != nil {
@@ -100,6 +102,7 @@ var _ fs.HandleFlusher = (*Handle)(nil)
 // Flush implements fs.HandleFlusher interface for *Handle
 func (h *Handle) Flush(ctx context.Context,
 	req *fuse.FlushRequest) (err error) {
+	time.Sleep(latency)
 	defer func() { log.Printf("Handle(%s).Flush(): error=%v", h.f.Name(), err) }()
 	return h.f.Sync()
 }
@@ -108,6 +111,7 @@ var _ fs.HandleReadAller = (*Handle)(nil)
 
 // ReadAll implements fs.HandleReadAller interface for *Handle
 func (h *Handle) ReadAll(ctx context.Context) (d []byte, err error) {
+	time.Sleep(latency)
 	defer func() {
 		log.Printf("Handle(%s).ReadAll(): error=%v",
 			h.f.Name(), err)
@@ -120,6 +124,7 @@ var _ fs.HandleReadDirAller = (*Handle)(nil)
 // ReadDirAll implements fs.HandleReadDirAller interface for *Handle
 func (h *Handle) ReadDirAll(ctx context.Context) (
 	dirs []fuse.Dirent, err error) {
+	time.Sleep(latency)
 	defer func() {
 		log.Printf("Handle(%s).ReadDirAll(): %#+v error=%v",
 			h.f.Name(), dirs, err)
@@ -148,6 +153,7 @@ var _ fs.HandleReader = (*Handle)(nil)
 // Read implements fs.HandleReader interface for *Handle
 func (h *Handle) Read(ctx context.Context,
 	req *fuse.ReadRequest, resp *fuse.ReadResponse) (err error) {
+	time.Sleep(latency)
 	defer func() {
 		log.Printf("Handle(%s).Read(): error=%v",
 			h.f.Name(), err)
@@ -167,6 +173,7 @@ var _ fs.HandleReleaser = (*Handle)(nil)
 // Release implements fs.HandleReleaser interface for *Handle
 func (h *Handle) Release(ctx context.Context,
 	req *fuse.ReleaseRequest) (err error) {
+	time.Sleep(latency)
 	defer func() {
 		log.Printf("Handle(%s).Release(): error=%v",
 			h.f.Name(), err)
@@ -182,6 +189,7 @@ var _ fs.HandleWriter = (*Handle)(nil)
 // Write implements fs.HandleWriter interface for *Handle
 func (h *Handle) Write(ctx context.Context,
 	req *fuse.WriteRequest, resp *fuse.WriteResponse) (err error) {
+	time.Sleep(latency)
 	defer func() {
 		log.Printf("Handle(%s).Write(): error=%v",
 			h.f.Name(), err)
@@ -210,6 +218,7 @@ var _ fs.NodeAccesser = (*Node)(nil)
 
 // Access implements fs.NodeAccesser interface for *Node
 func (n *Node) Access(ctx context.Context, a *fuse.AccessRequest) (err error) {
+	time.Sleep(latency)
 	defer func() {
 		log.Printf("%s.Access(%o): error=%v", n.realPath, a.Mask, err)
 	}()
@@ -225,6 +234,7 @@ func (n *Node) Access(ctx context.Context, a *fuse.AccessRequest) (err error) {
 
 // Attr implements fs.Node interface for *Dir
 func (n *Node) Attr(ctx context.Context, a *fuse.Attr) (err error) {
+	time.Sleep(latency)
 	defer func() { log.Printf("%s.Attr(): %#+v error=%v", n.realPath, a, err) }()
 	fi, err := os.Stat(n.realPath)
 	if err != nil {
@@ -239,6 +249,7 @@ func (n *Node) Attr(ctx context.Context, a *fuse.Attr) (err error) {
 // Lookup implements fs.Node interface for *Node
 func (n *Node) Lookup(ctx context.Context,
 	name string) (ret fs.Node, err error) {
+	time.Sleep(latency)
 	defer func() {
 		log.Printf("%s.Lookup(%s): %#+v error=%v",
 			n.realPath, name, ret, err)
@@ -339,6 +350,7 @@ var _ fs.NodeOpener = (*Node)(nil)
 // Open implements fs.NodeOpener interface for *Node
 func (n *Node) Open(ctx context.Context,
 	req *fuse.OpenRequest, resp *fuse.OpenResponse) (h fs.Handle, err error) {
+	time.Sleep(latency)
 	flags, perm := fuseOpenFlagsToOSFlagsAndPerms(req.Flags)
 	defer func() {
 		log.Printf("%s.Open(): %o %o error=%v",
@@ -368,6 +380,7 @@ var _ fs.NodeCreater = (*Node)(nil)
 func (n *Node) Create(
 	ctx context.Context, req *fuse.CreateRequest, resp *fuse.CreateResponse) (
 	fsn fs.Node, fsh fs.Handle, err error) {
+	time.Sleep(latency)
 	flags, _ := fuseOpenFlagsToOSFlagsAndPerms(req.Flags)
 	name := filepath.Join(n.realPath, req.Name)
 	defer func() {
@@ -403,6 +416,7 @@ var _ fs.NodeMkdirer = (*Node)(nil)
 // Mkdir implements fs.NodeMkdirer interface for *Node
 func (n *Node) Mkdir(ctx context.Context,
 	req *fuse.MkdirRequest) (fs.Node, error) {
+	time.Sleep(latency)
 	name := filepath.Join(n.realPath, req.Name)
 	err := os.Mkdir(name, req.Mode)
 	if err != nil {
@@ -415,6 +429,7 @@ var _ fs.NodeRemover = (*Node)(nil)
 
 // Remove implements fs.NodeRemover interface for *Node
 func (n *Node) Remove(ctx context.Context, req *fuse.RemoveRequest) (err error) {
+	time.Sleep(latency)
 	name := filepath.Join(n.realPath, req.Name)
 	defer func() { log.Printf("%s.Remove(%s): error=%v", n.realPath, name, err) }()
 	defer func() {
@@ -429,6 +444,7 @@ var _ fs.NodeFsyncer = (*Node)(nil)
 
 // Fsync implements fs.NodeFsyncer interface for *Node
 func (n *Node) Fsync(ctx context.Context, req *fuse.FsyncRequest) (err error) {
+	time.Sleep(latency)
 	defer func() { log.Printf("%s.Fsync(): error=%v", n.realPath, err) }()
 	n.lock.RLock()
 	defer n.lock.RUnlock()
@@ -443,6 +459,7 @@ var _ fs.NodeSetattrer = (*Node)(nil)
 // Setattr implements fs.NodeSetattrer interface for *Node
 func (n *Node) Setattr(ctx context.Context,
 	req *fuse.SetattrRequest, resp *fuse.SetattrResponse) (err error) {
+	time.Sleep(latency)
 	defer func() {
 		log.Printf("%s.Setattr(valid=%x): error=%v", n.realPath, req.Valid, err)
 	}()
@@ -514,6 +531,7 @@ var _ fs.NodeRenamer = (*Node)(nil)
 // Rename implements fs.NodeRenamer interface for *Node
 func (n *Node) Rename(ctx context.Context,
 	req *fuse.RenameRequest, newDir fs.Node) (err error) {
+	time.Sleep(latency)
 	np := filepath.Join(newDir.(*Node).realPath, req.NewName)
 	op := filepath.Join(n.realPath, req.OldName)
 	defer func() {
@@ -540,6 +558,7 @@ var _ fs.NodeGetxattrer = (*Node)(nil)
 // Getxattr implements fs.Getxattrer interface for *Node
 func (n *Node) Getxattr(ctx context.Context,
 	req *fuse.GetxattrRequest, resp *fuse.GetxattrResponse) (err error) {
+	time.Sleep(latency)
 	if !inMemoryXattr {
 		return fuse.ENOTSUP
 	}
@@ -567,6 +586,7 @@ var _ fs.NodeListxattrer = (*Node)(nil)
 // Listxattr implements fs.Listxattrer interface for *Node
 func (n *Node) Listxattr(ctx context.Context,
 	req *fuse.ListxattrRequest, resp *fuse.ListxattrResponse) (err error) {
+	time.Sleep(latency)
 	if !inMemoryXattr {
 		return fuse.ENOTSUP
 	}
@@ -608,6 +628,7 @@ var _ fs.NodeSetxattrer = (*Node)(nil)
 // Setxattr implements fs.Setxattrer interface for *Node
 func (n *Node) Setxattr(ctx context.Context,
 	req *fuse.SetxattrRequest) (err error) {
+	time.Sleep(latency)
 	if !inMemoryXattr {
 		return fuse.ENOTSUP
 	}
@@ -634,6 +655,7 @@ var _ fs.NodeRemovexattrer = (*Node)(nil)
 // Removexattr implements fs.Removexattrer interface for *Node
 func (n *Node) Removexattr(ctx context.Context,
 	req *fuse.RemovexattrRequest) (err error) {
+	time.Sleep(latency)
 	if !inMemoryXattr {
 		return fuse.ENOTSUP
 	}
