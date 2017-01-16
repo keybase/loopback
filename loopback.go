@@ -11,6 +11,8 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -24,12 +26,24 @@ const (
 	attrValidDuration = time.Second
 )
 
+const (
+	g_KAUTH_FILESEC_XATTR = "org.apple.system.Security"
+	a_KAUTH_FILESEC_XATTR = "com.apple.system.Security"
+)
+
 // FS is the filesystem root
 type FS struct {
 	rootPath string
 
-	lock    sync.Mutex
-	handles map[fuse.HandleID]*Handle
+	xlock  sync.RWMutex
+	xattrs map[string]map[string][]byte
+}
+
+func newFS(rootPath string) *FS {
+	return &FS{
+		rootPath: rootPath,
+		xattrs:   make(map[string]map[string][]byte),
+	}
 }
 
 // Root implements fs.FS interface for *FS
@@ -58,6 +72,18 @@ func (f *FS) Statfs(ctx context.Context,
 	resp.Frsize = 8    // TODO
 
 	return nil
+}
+
+// if to is empty, all xattrs on the node is removed
+func (f *FS) moveAllxattrs(ctx context.Context, from string, to string) {
+	f.xlock.Lock()
+	defer f.xlock.Unlock()
+	if f.xattrs[from] != nil {
+		if to != "" {
+			f.xattrs[to] = f.xattrs[from]
+		}
+		f.xattrs[from] = nil
+	}
 }
 
 // Handle represent an open file or directory
@@ -184,13 +210,14 @@ var _ fs.NodeAccesser = (*Node)(nil)
 
 // Access implements fs.NodeAccesser interface for *Node
 func (n *Node) Access(ctx context.Context, a *fuse.AccessRequest) (err error) {
-	defer func() { log.Printf("%s.Access(): error=%v", n.realPath, err) }()
+	defer func() {
+		log.Printf("%s.Access(%o): error=%v", n.realPath, a.Mask, err)
+	}()
 	fi, err := os.Stat(n.realPath)
 	if err != nil {
 		return err
 	}
 	if a.Mask&uint32(fi.Mode()>>6) != a.Mask {
-		log.Printf("MASK %v %v", a.Mask, fi.Mode()>>6)
 		return fuse.EPERM
 	}
 	return nil
@@ -390,7 +417,12 @@ var _ fs.NodeRemover = (*Node)(nil)
 func (n *Node) Remove(ctx context.Context, req *fuse.RemoveRequest) (err error) {
 	name := filepath.Join(n.realPath, req.Name)
 	defer func() { log.Printf("%s.Remove(%s): error=%v", n.realPath, name, err) }()
-	return os.Remove(filepath.Join(n.realPath, req.Name))
+	defer func() {
+		if err == nil {
+			n.fs.moveAllxattrs(ctx, name, "")
+		}
+	}()
+	return os.Remove(name)
 }
 
 var _ fs.NodeFsyncer = (*Node)(nil)
@@ -411,10 +443,12 @@ var _ fs.NodeSetattrer = (*Node)(nil)
 // Setattr implements fs.NodeSetattrer interface for *Node
 func (n *Node) Setattr(ctx context.Context,
 	req *fuse.SetattrRequest, resp *fuse.SetattrResponse) (err error) {
-	defer func() { log.Printf("%s.Setattr(): error=%v", n.realPath, err) }()
+	defer func() {
+		log.Printf("%s.Setattr(valid=%x): error=%v", n.realPath, req.Valid, err)
+	}()
 	if req.Valid.Size() {
 		if err = syscall.Truncate(n.realPath, int64(req.Size)); err != nil {
-			return nil
+			return err
 		}
 	}
 
@@ -486,5 +520,139 @@ func (n *Node) Rename(ctx context.Context,
 		log.Printf("%s.Rename(%s->%s): error=%v",
 			n.realPath, op, np, err)
 	}()
+	defer func() {
+		if err == nil {
+			n.fs.moveAllxattrs(ctx, op, np)
+		}
+	}()
 	return os.Rename(op, np)
+}
+
+func xattrNameMutate(name string) string {
+	if strings.HasPrefix(name, a_KAUTH_FILESEC_XATTR) {
+		name = g_KAUTH_FILESEC_XATTR + name[len(g_KAUTH_FILESEC_XATTR):]
+	}
+	return name
+}
+
+var _ fs.NodeGetxattrer = (*Node)(nil)
+
+// Getxattr implements fs.Getxattrer interface for *Node
+func (n *Node) Getxattr(ctx context.Context,
+	req *fuse.GetxattrRequest, resp *fuse.GetxattrResponse) (err error) {
+	if !inMemoryXattr {
+		return fuse.ENOTSUP
+	}
+
+	defer func() {
+		log.Printf("%s.Getxattr(%s): error=%v", n.realPath, req.Name, err)
+	}()
+	n.fs.xlock.RLock()
+	defer n.fs.xlock.RUnlock()
+	if x := n.fs.xattrs[n.realPath]; x != nil {
+
+		name := xattrNameMutate(req.Name)
+
+		var ok bool
+		resp.Xattr, ok = x[name]
+		if ok {
+			return nil
+		}
+	}
+	return fuse.ENOATTR
+}
+
+var _ fs.NodeListxattrer = (*Node)(nil)
+
+// Listxattr implements fs.Listxattrer interface for *Node
+func (n *Node) Listxattr(ctx context.Context,
+	req *fuse.ListxattrRequest, resp *fuse.ListxattrResponse) (err error) {
+	if !inMemoryXattr {
+		return fuse.ENOTSUP
+	}
+
+	defer func() {
+		log.Printf("%s.Listxattr(%d,%d): error=%v",
+			n.realPath, req.Position, req.Size, err)
+	}()
+	n.fs.xlock.RLock()
+	defer n.fs.xlock.RUnlock()
+	if x := n.fs.xattrs[n.realPath]; x != nil {
+		names := make([]string, 0)
+		for k := range x {
+			if !strings.HasPrefix(k, g_KAUTH_FILESEC_XATTR) {
+				names = append(names, k)
+			}
+		}
+		sort.Strings(names)
+
+		if int(req.Position) >= len(names) {
+			return nil
+		}
+		names = names[int(req.Position):]
+
+		s := int(req.Size)
+		if s == 0 || s > len(names) {
+			s = len(names)
+		}
+		if s > 0 {
+			resp.Append(names[:s]...)
+		}
+	}
+
+	return nil
+}
+
+var _ fs.NodeSetxattrer = (*Node)(nil)
+
+// Setxattr implements fs.Setxattrer interface for *Node
+func (n *Node) Setxattr(ctx context.Context,
+	req *fuse.SetxattrRequest) (err error) {
+	if !inMemoryXattr {
+		return fuse.ENOTSUP
+	}
+
+	defer func() {
+		log.Printf("%s.Setxattr(%s): error=%v", n.realPath, req.Name, err)
+	}()
+	n.fs.xlock.Lock()
+	defer n.fs.xlock.Unlock()
+	if n.fs.xattrs[n.realPath] == nil {
+		n.fs.xattrs[n.realPath] = make(map[string][]byte)
+	}
+	buf := make([]byte, len(req.Xattr))
+	copy(buf, req.Xattr)
+
+	name := xattrNameMutate(req.Name)
+
+	n.fs.xattrs[n.realPath][name] = buf
+	return nil
+}
+
+var _ fs.NodeRemovexattrer = (*Node)(nil)
+
+// Removexattr implements fs.Removexattrer interface for *Node
+func (n *Node) Removexattr(ctx context.Context,
+	req *fuse.RemovexattrRequest) (err error) {
+	if !inMemoryXattr {
+		return fuse.ENOTSUP
+	}
+
+	defer func() {
+		log.Printf("%s.Removexattr(%s): error=%v", n.realPath, req.Name, err)
+	}()
+	n.fs.xlock.Lock()
+	defer n.fs.xlock.Unlock()
+
+	name := xattrNameMutate(req.Name)
+
+	if x := n.fs.xattrs[n.realPath]; x != nil {
+		var ok bool
+		_, ok = x[name]
+		if ok {
+			delete(x, name)
+			return nil
+		}
+	}
+	return fuse.ENOATTR
 }

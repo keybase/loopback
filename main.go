@@ -16,6 +16,16 @@ import (
 	"bazil.org/fuse/fs"
 )
 
+var (
+	inMemoryXattr bool
+)
+
+func init() {
+	flag.BoolVar(&inMemoryXattr, "in-memory-xattr", false,
+		"use an in-memory implementation for xattr. Otherwise,\n"+
+			"fall back to the ._ file approach provided by osxfuse.")
+}
+
 func usage() {
 	fmt.Fprintf(os.Stderr, "Usage of %s:\n", os.Args[0])
 	fmt.Fprintf(os.Stderr, "  %s ROOT MOUNTPOINT\n", os.Args[0])
@@ -36,7 +46,7 @@ func main() {
 		mountpoint,
 		fuse.FSName("loopback"),
 		fuse.Subtype("loopback-fs"),
-		fuse.VolumeName("Loopback"),
+		fuse.VolumeName("goLoopback"),
 		fuse.AllowRoot(),
 	)
 	if err != nil {
@@ -52,7 +62,7 @@ func main() {
 
 	log.Println("mounted!")
 
-	err = fs.Serve(c, &FS{rootPath: flag.Arg(0)})
+	err = fs.Serve(c, newFS(flag.Arg(0)))
 	if err != nil {
 		log.Fatal(err)
 	}
