@@ -12,7 +12,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -24,11 +23,6 @@ import (
 
 const (
 	attrValidDuration = time.Second
-)
-
-const (
-	g_KAUTH_FILESEC_XATTR = "org.apple.system.Security"
-	a_KAUTH_FILESEC_XATTR = "com.apple.system.Security"
 )
 
 func translateError(err error) error {
@@ -557,13 +551,6 @@ func (n *Node) Rename(ctx context.Context,
 	return os.Rename(op, np)
 }
 
-func xattrNameMutate(name string) string {
-	if strings.HasPrefix(name, a_KAUTH_FILESEC_XATTR) {
-		name = g_KAUTH_FILESEC_XATTR + name[len(g_KAUTH_FILESEC_XATTR):]
-	}
-	return name
-}
-
 var _ fs.NodeGetxattrer = (*Node)(nil)
 
 // Getxattr implements fs.Getxattrer interface for *Node
@@ -581,10 +568,8 @@ func (n *Node) Getxattr(ctx context.Context,
 	defer n.fs.xlock.RUnlock()
 	if x := n.fs.xattrs[n.realPath]; x != nil {
 
-		name := xattrNameMutate(req.Name)
-
 		var ok bool
-		resp.Xattr, ok = x[name]
+		resp.Xattr, ok = x[req.Name]
 		if ok {
 			return nil
 		}
@@ -611,9 +596,7 @@ func (n *Node) Listxattr(ctx context.Context,
 	if x := n.fs.xattrs[n.realPath]; x != nil {
 		names := make([]string, 0)
 		for k := range x {
-			if !strings.HasPrefix(k, g_KAUTH_FILESEC_XATTR) {
-				names = append(names, k)
-			}
+			names = append(names, k)
 		}
 		sort.Strings(names)
 
@@ -655,9 +638,7 @@ func (n *Node) Setxattr(ctx context.Context,
 	buf := make([]byte, len(req.Xattr))
 	copy(buf, req.Xattr)
 
-	name := xattrNameMutate(req.Name)
-
-	n.fs.xattrs[n.realPath][name] = buf
+	n.fs.xattrs[n.realPath][req.Name] = buf
 	return nil
 }
 
@@ -677,7 +658,7 @@ func (n *Node) Removexattr(ctx context.Context,
 	n.fs.xlock.Lock()
 	defer n.fs.xlock.Unlock()
 
-	name := xattrNameMutate(req.Name)
+	name := req.Name
 
 	if x := n.fs.xattrs[n.realPath]; x != nil {
 		var ok bool
