@@ -8,6 +8,7 @@ package main
 
 import (
 	"context"
+	"log"
 	"os"
 	"syscall"
 	"time"
@@ -36,6 +37,7 @@ func fillAttrWithFileInfo(a *fuse.Attr, fi os.FileInfo) {
 func (n *Node) setattrPlatformSpecific(ctx context.Context,
 	req *fuse.SetattrRequest, resp *fuse.SetattrResponse) (err error) {
 	if req.Valid.Flags() {
+		log.Printf("Flags: %x", req.Flags)
 		if err = syscall.Chflags(n.realPath, int(req.Flags)); err != nil {
 			return err
 		}

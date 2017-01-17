@@ -31,6 +31,19 @@ const (
 	a_KAUTH_FILESEC_XATTR = "com.apple.system.Security"
 )
 
+func translateError(err error) error {
+	switch {
+	case os.IsNotExist(err):
+		return fuse.ENOENT
+	case os.IsExist(err):
+		return fuse.EEXIST
+	case os.IsPermission(err):
+		return fuse.EPERM
+	default:
+		return err
+	}
+}
+
 // FS is the filesystem root
 type FS struct {
 	rootPath string
@@ -62,7 +75,7 @@ func (f *FS) Statfs(ctx context.Context,
 	defer func() { log.Printf("FS.Statfs(): error=%v", err) }()
 	var stat syscall.Statfs_t
 	if err := syscall.Statfs(f.rootPath, &stat); err != nil {
-		return err
+		return translateError(err)
 	}
 	resp.Blocks = stat.Blocks
 	resp.Bfree = stat.Bfree
@@ -131,7 +144,7 @@ func (h *Handle) ReadDirAll(ctx context.Context) (
 	}()
 	fis, err := h.f.Readdir(0)
 	if err != nil {
-		return nil, err
+		return nil, translateError(err)
 	}
 
 	// Readdir() reads up the entire dir stream but never resets the pointer.
@@ -139,10 +152,10 @@ func (h *Handle) ReadDirAll(ctx context.Context) (
 	// nothing. As a result, we need to close the file descriptor and re-open it
 	// so next call would work.
 	if err = h.f.Close(); err != nil {
-		return nil, err
+		return nil, translateError(err)
 	}
 	if h.f, err = h.reopener(); err != nil {
-		return nil, err
+		return nil, translateError(err)
 	}
 
 	return getDirentsWithFileInfos(fis), nil
@@ -160,12 +173,12 @@ func (h *Handle) Read(ctx context.Context,
 	}()
 
 	if _, err = h.f.Seek(req.Offset, 0); err != nil {
-		return err
+		return translateError(err)
 	}
 	resp.Data = make([]byte, req.Size)
 	n, err := h.f.Read(resp.Data)
 	resp.Data = resp.Data[:n]
-	return err
+	return translateError(err)
 }
 
 var _ fs.HandleReleaser = (*Handle)(nil)
@@ -196,11 +209,11 @@ func (h *Handle) Write(ctx context.Context,
 	}()
 
 	if _, err = h.f.Seek(req.Offset, 0); err != nil {
-		return err
+		return translateError(err)
 	}
 	n, err := h.f.Write(req.Data)
 	resp.Size = n
-	return err
+	return translateError(err)
 }
 
 // Node is the node for both directories and files
@@ -224,7 +237,7 @@ func (n *Node) Access(ctx context.Context, a *fuse.AccessRequest) (err error) {
 	}()
 	fi, err := os.Stat(n.realPath)
 	if err != nil {
-		return err
+		return translateError(err)
 	}
 	if a.Mask&uint32(fi.Mode()>>6) != a.Mask {
 		return fuse.EPERM
@@ -238,7 +251,7 @@ func (n *Node) Attr(ctx context.Context, a *fuse.Attr) (err error) {
 	defer func() { log.Printf("%s.Attr(): %#+v error=%v", n.realPath, a, err) }()
 	fi, err := os.Stat(n.realPath)
 	if err != nil {
-		return err
+		return translateError(err)
 	}
 
 	fillAttrWithFileInfo(a, fi)
@@ -246,7 +259,7 @@ func (n *Node) Attr(ctx context.Context, a *fuse.Attr) (err error) {
 	return nil
 }
 
-// Lookup implements fs.Node interface for *Node
+// Lookup implements fs.NodeRequestLookuper interface for *Node
 func (n *Node) Lookup(ctx context.Context,
 	name string) (ret fs.Node, err error) {
 	time.Sleep(latency)
@@ -262,17 +275,15 @@ func (n *Node) Lookup(ctx context.Context,
 	p := filepath.Join(n.realPath, name)
 	fi, err := os.Stat(p)
 
-	switch {
-	case os.IsNotExist(err):
-		return nil, fuse.ENOENT
-	case err == nil:
-		if fi.IsDir() {
-			return &Node{realPath: p, isDir: true, fs: n.fs}, nil
-		}
-		return &Node{realPath: p, isDir: false, fs: n.fs}, nil
-	default:
-		return nil, err
+	err = translateError(err)
+	if err != nil {
+		return nil, translateError(err)
 	}
+
+	if fi.IsDir() {
+		return &Node{realPath: p, isDir: true, fs: n.fs}, nil
+	}
+	return &Node{realPath: p, isDir: false, fs: n.fs}, nil
 }
 
 func getDirentsWithFileInfos(fis []os.FileInfo) (dirs []fuse.Dirent) {
@@ -363,7 +374,7 @@ func (n *Node) Open(ctx context.Context,
 
 	f, err := opener()
 	if err != nil {
-		return nil, err
+		return nil, translateError(err)
 	}
 
 	handle := &Handle{fs: n.fs, f: f, reopener: opener}
@@ -394,7 +405,7 @@ func (n *Node) Create(
 
 	f, err := opener()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, translateError(err)
 	}
 
 	h := &Handle{fs: n.fs, f: f, reopener: opener}
@@ -415,12 +426,12 @@ var _ fs.NodeMkdirer = (*Node)(nil)
 
 // Mkdir implements fs.NodeMkdirer interface for *Node
 func (n *Node) Mkdir(ctx context.Context,
-	req *fuse.MkdirRequest) (fs.Node, error) {
+	req *fuse.MkdirRequest) (created fs.Node, err error) {
 	time.Sleep(latency)
+	defer func() { log.Printf("%s.Mkdir(%s): error=%v", n.realPath, req.Name, err) }()
 	name := filepath.Join(n.realPath, req.Name)
-	err := os.Mkdir(name, req.Mode)
-	if err != nil {
-		return nil, err
+	if err = os.Mkdir(name, req.Mode); err != nil {
+		return nil, translateError(err)
 	}
 	return &Node{realPath: name, isDir: true, fs: n.fs}, nil
 }
@@ -465,7 +476,7 @@ func (n *Node) Setattr(ctx context.Context,
 	}()
 	if req.Valid.Size() {
 		if err = syscall.Truncate(n.realPath, int64(req.Size)); err != nil {
-			return err
+			return translateError(err)
 		}
 	}
 
@@ -486,39 +497,39 @@ func (n *Node) Setattr(ctx context.Context,
 
 	if req.Valid.Mode() {
 		if err = os.Chmod(n.realPath, req.Mode); err != nil {
-			return err
+			return translateError(err)
 		}
 	}
 
 	if req.Valid.Uid() || req.Valid.Gid() {
 		if req.Valid.Uid() && req.Valid.Gid() {
 			if err = os.Chown(n.realPath, int(req.Uid), int(req.Gid)); err != nil {
-				return err
+				return translateError(err)
 			}
 		}
 		fi, err := os.Stat(n.realPath)
 		if err != nil {
-			return err
+			return translateError(err)
 		}
 		s := fi.Sys().(*syscall.Stat_t)
 		if req.Valid.Uid() {
 			if err = os.Chown(n.realPath, int(req.Uid), int(s.Gid)); err != nil {
-				return err
+				return translateError(err)
 			}
 		} else {
 			if err = os.Chown(n.realPath, int(s.Uid), int(req.Gid)); err != nil {
-				return err
+				return translateError(err)
 			}
 		}
 	}
 
 	if err = n.setattrPlatformSpecific(ctx, req, resp); err != nil {
-		return err
+		return translateError(err)
 	}
 
 	fi, err := os.Stat(n.realPath)
 	if err != nil {
-		return err
+		return translateError(err)
 	}
 
 	fillAttrWithFileInfo(&resp.Attr, fi)
