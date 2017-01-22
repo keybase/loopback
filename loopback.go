@@ -62,9 +62,6 @@ func (f *FS) newNode(n *Node) {
 
 	f.nlock.Lock()
 	defer f.nlock.Unlock()
-	if f.nodes[rp] == nil {
-		f.nodes[rp] = make([]*Node, 0)
-	}
 	f.nodes[rp] = append(f.nodes[rp], n)
 }
 
@@ -72,6 +69,7 @@ func (f *FS) nodeRenamed(oldPath string, newPath string) {
 	f.nlock.Lock()
 	defer f.nlock.Unlock()
 	f.nodes[newPath] = append(f.nodes[newPath], f.nodes[oldPath]...)
+	delete(f.nodes, oldPath)
 	for _, n := range f.nodes[newPath] {
 		n.updateRealPath(newPath)
 	}
@@ -94,10 +92,7 @@ func (f *FS) forgetNode(n *Node) {
 	}
 
 	if found > -1 {
-		for i := found; i < len(nodes)-1; i++ {
-			nodes[i] = nodes[i+1]
-		}
-		nodes = nodes[:len(nodes)-1]
+		nodes = append(nodes[:found], nodes[found+1:]...)
 	}
 	if len(nodes) == 0 {
 		delete(f.nodes, n.realPath)
