@@ -44,12 +44,60 @@ type FS struct {
 
 	xlock  sync.RWMutex
 	xattrs map[string]map[string][]byte
+
+	nlock sync.Mutex
+	nodes map[string][]*Node // realPath -> nodes
 }
 
 func newFS(rootPath string) *FS {
 	return &FS{
 		rootPath: rootPath,
 		xattrs:   make(map[string]map[string][]byte),
+		nodes:    make(map[string][]*Node),
+	}
+}
+
+func (f *FS) newNode(n *Node) {
+	rp := n.getRealPath()
+
+	f.nlock.Lock()
+	defer f.nlock.Unlock()
+	f.nodes[rp] = append(f.nodes[rp], n)
+}
+
+func (f *FS) nodeRenamed(oldPath string, newPath string) {
+	f.nlock.Lock()
+	defer f.nlock.Unlock()
+	f.nodes[newPath] = append(f.nodes[newPath], f.nodes[oldPath]...)
+	delete(f.nodes, oldPath)
+	for _, n := range f.nodes[newPath] {
+		n.updateRealPath(newPath)
+	}
+}
+
+func (f *FS) forgetNode(n *Node) {
+	f.nlock.Lock()
+	defer f.nlock.Unlock()
+	nodes, ok := f.nodes[n.realPath]
+	if !ok {
+		return
+	}
+
+	found := -1
+	for i, node := range nodes {
+		if node == n {
+			found = i
+			break
+		}
+	}
+
+	if found > -1 {
+		nodes = append(nodes[:found], nodes[found+1:]...)
+	}
+	if len(nodes) == 0 {
+		delete(f.nodes, n.realPath)
+	} else {
+		f.nodes[n.realPath] = nodes
 	}
 }
 
@@ -57,7 +105,9 @@ func newFS(rootPath string) *FS {
 func (f *FS) Root() (n fs.Node, err error) {
 	time.Sleep(latency)
 	defer func() { log.Printf("FS.Root(): %#+v error=%v", n, err) }()
-	return &Node{realPath: f.rootPath, isDir: true, fs: f}, nil
+	nn := &Node{realPath: f.rootPath, isDir: true, fs: f}
+	f.newNode(nn)
+	return nn, nil
 }
 
 var _ fs.FSStatfser = (*FS)(nil)
@@ -214,11 +264,25 @@ func (h *Handle) Write(ctx context.Context,
 type Node struct {
 	fs *FS
 
+	rpLock   sync.RWMutex
 	realPath string
-	isDir    bool
+
+	isDir bool
 
 	lock     sync.RWMutex
 	flushers map[*Handle]bool
+}
+
+func (n *Node) getRealPath() string {
+	n.rpLock.RLock()
+	defer n.rpLock.RUnlock()
+	return n.realPath
+}
+
+func (n *Node) updateRealPath(realPath string) {
+	n.rpLock.Lock()
+	defer n.rpLock.Unlock()
+	n.realPath = realPath
 }
 
 var _ fs.NodeAccesser = (*Node)(nil)
@@ -227,9 +291,9 @@ var _ fs.NodeAccesser = (*Node)(nil)
 func (n *Node) Access(ctx context.Context, a *fuse.AccessRequest) (err error) {
 	time.Sleep(latency)
 	defer func() {
-		log.Printf("%s.Access(%o): error=%v", n.realPath, a.Mask, err)
+		log.Printf("%s.Access(%o): error=%v", n.getRealPath(), a.Mask, err)
 	}()
-	fi, err := os.Stat(n.realPath)
+	fi, err := os.Stat(n.getRealPath())
 	if err != nil {
 		return translateError(err)
 	}
@@ -242,8 +306,8 @@ func (n *Node) Access(ctx context.Context, a *fuse.AccessRequest) (err error) {
 // Attr implements fs.Node interface for *Dir
 func (n *Node) Attr(ctx context.Context, a *fuse.Attr) (err error) {
 	time.Sleep(latency)
-	defer func() { log.Printf("%s.Attr(): %#+v error=%v", n.realPath, a, err) }()
-	fi, err := os.Stat(n.realPath)
+	defer func() { log.Printf("%s.Attr(): %#+v error=%v", n.getRealPath(), a, err) }()
+	fi, err := os.Stat(n.getRealPath())
 	if err != nil {
 		return translateError(err)
 	}
@@ -259,14 +323,14 @@ func (n *Node) Lookup(ctx context.Context,
 	time.Sleep(latency)
 	defer func() {
 		log.Printf("%s.Lookup(%s): %#+v error=%v",
-			n.realPath, name, ret, err)
+			n.getRealPath(), name, ret, err)
 	}()
 
 	if !n.isDir {
 		return nil, fuse.ENOTSUP
 	}
 
-	p := filepath.Join(n.realPath, name)
+	p := filepath.Join(n.getRealPath(), name)
 	fi, err := os.Stat(p)
 
 	err = translateError(err)
@@ -274,10 +338,15 @@ func (n *Node) Lookup(ctx context.Context,
 		return nil, translateError(err)
 	}
 
+	var nn *Node
 	if fi.IsDir() {
-		return &Node{realPath: p, isDir: true, fs: n.fs}, nil
+		nn = &Node{realPath: p, isDir: true, fs: n.fs}
+	} else {
+		nn = &Node{realPath: p, isDir: false, fs: n.fs}
 	}
-	return &Node{realPath: p, isDir: false, fs: n.fs}, nil
+
+	n.fs.newNode(nn)
+	return nn, nil
 }
 
 func getDirentsWithFileInfos(fis []os.FileInfo) (dirs []fuse.Dirent) {
@@ -359,11 +428,11 @@ func (n *Node) Open(ctx context.Context,
 	flags, perm := fuseOpenFlagsToOSFlagsAndPerms(req.Flags)
 	defer func() {
 		log.Printf("%s.Open(): %o %o error=%v",
-			n.realPath, flags, perm, err)
+			n.getRealPath(), flags, perm, err)
 	}()
 
 	opener := func() (*os.File, error) {
-		return os.OpenFile(n.realPath, flags, perm)
+		return os.OpenFile(n.getRealPath(), flags, perm)
 	}
 
 	f, err := opener()
@@ -387,10 +456,10 @@ func (n *Node) Create(
 	fsn fs.Node, fsh fs.Handle, err error) {
 	time.Sleep(latency)
 	flags, _ := fuseOpenFlagsToOSFlagsAndPerms(req.Flags)
-	name := filepath.Join(n.realPath, req.Name)
+	name := filepath.Join(n.getRealPath(), req.Name)
 	defer func() {
 		log.Printf("%s.Create(%s): %o %o error=%v",
-			n.realPath, name, flags, req.Mode, err)
+			n.getRealPath(), name, flags, req.Mode, err)
 	}()
 
 	opener := func() (f *os.File, err error) {
@@ -405,7 +474,7 @@ func (n *Node) Create(
 	h := &Handle{fs: n.fs, f: f, reopener: opener}
 
 	node := &Node{
-		realPath: filepath.Join(n.realPath, req.Name),
+		realPath: filepath.Join(n.getRealPath(), req.Name),
 		isDir:    req.Mode.IsDir(),
 		fs:       n.fs,
 	}
@@ -413,6 +482,7 @@ func (n *Node) Create(
 	h.forgetter = func() {
 		node.forgetHandle(h)
 	}
+	n.fs.newNode(node)
 	return node, h, nil
 }
 
@@ -422,12 +492,14 @@ var _ fs.NodeMkdirer = (*Node)(nil)
 func (n *Node) Mkdir(ctx context.Context,
 	req *fuse.MkdirRequest) (created fs.Node, err error) {
 	time.Sleep(latency)
-	defer func() { log.Printf("%s.Mkdir(%s): error=%v", n.realPath, req.Name, err) }()
-	name := filepath.Join(n.realPath, req.Name)
+	defer func() { log.Printf("%s.Mkdir(%s): error=%v", n.getRealPath(), req.Name, err) }()
+	name := filepath.Join(n.getRealPath(), req.Name)
 	if err = os.Mkdir(name, req.Mode); err != nil {
 		return nil, translateError(err)
 	}
-	return &Node{realPath: name, isDir: true, fs: n.fs}, nil
+	nn := &Node{realPath: name, isDir: true, fs: n.fs}
+	n.fs.newNode(nn)
+	return nn, nil
 }
 
 var _ fs.NodeRemover = (*Node)(nil)
@@ -435,8 +507,8 @@ var _ fs.NodeRemover = (*Node)(nil)
 // Remove implements fs.NodeRemover interface for *Node
 func (n *Node) Remove(ctx context.Context, req *fuse.RemoveRequest) (err error) {
 	time.Sleep(latency)
-	name := filepath.Join(n.realPath, req.Name)
-	defer func() { log.Printf("%s.Remove(%s): error=%v", n.realPath, name, err) }()
+	name := filepath.Join(n.getRealPath(), req.Name)
+	defer func() { log.Printf("%s.Remove(%s): error=%v", n.getRealPath(), name, err) }()
 	defer func() {
 		if err == nil {
 			n.fs.moveAllxattrs(ctx, name, "")
@@ -450,7 +522,7 @@ var _ fs.NodeFsyncer = (*Node)(nil)
 // Fsync implements fs.NodeFsyncer interface for *Node
 func (n *Node) Fsync(ctx context.Context, req *fuse.FsyncRequest) (err error) {
 	time.Sleep(latency)
-	defer func() { log.Printf("%s.Fsync(): error=%v", n.realPath, err) }()
+	defer func() { log.Printf("%s.Fsync(): error=%v", n.getRealPath(), err) }()
 	n.lock.RLock()
 	defer n.lock.RUnlock()
 	for h := range n.flushers {
@@ -466,10 +538,10 @@ func (n *Node) Setattr(ctx context.Context,
 	req *fuse.SetattrRequest, resp *fuse.SetattrResponse) (err error) {
 	time.Sleep(latency)
 	defer func() {
-		log.Printf("%s.Setattr(valid=%x): error=%v", n.realPath, req.Valid, err)
+		log.Printf("%s.Setattr(valid=%x): error=%v", n.getRealPath(), req.Valid, err)
 	}()
 	if req.Valid.Size() {
-		if err = syscall.Truncate(n.realPath, int64(req.Size)); err != nil {
+		if err = syscall.Truncate(n.getRealPath(), int64(req.Size)); err != nil {
 			return translateError(err)
 		}
 	}
@@ -486,32 +558,32 @@ func (n *Node) Setattr(ctx context.Context,
 
 	if req.Valid.Handle() {
 		log.Printf("%s.Setattr(): unhandled request: req.Valid.Handle() == true",
-			n.realPath)
+			n.getRealPath())
 	}
 
 	if req.Valid.Mode() {
-		if err = os.Chmod(n.realPath, req.Mode); err != nil {
+		if err = os.Chmod(n.getRealPath(), req.Mode); err != nil {
 			return translateError(err)
 		}
 	}
 
 	if req.Valid.Uid() || req.Valid.Gid() {
 		if req.Valid.Uid() && req.Valid.Gid() {
-			if err = os.Chown(n.realPath, int(req.Uid), int(req.Gid)); err != nil {
+			if err = os.Chown(n.getRealPath(), int(req.Uid), int(req.Gid)); err != nil {
 				return translateError(err)
 			}
 		}
-		fi, err := os.Stat(n.realPath)
+		fi, err := os.Stat(n.getRealPath())
 		if err != nil {
 			return translateError(err)
 		}
 		s := fi.Sys().(*syscall.Stat_t)
 		if req.Valid.Uid() {
-			if err = os.Chown(n.realPath, int(req.Uid), int(s.Gid)); err != nil {
+			if err = os.Chown(n.getRealPath(), int(req.Uid), int(s.Gid)); err != nil {
 				return translateError(err)
 			}
 		} else {
-			if err = os.Chown(n.realPath, int(s.Uid), int(req.Gid)); err != nil {
+			if err = os.Chown(n.getRealPath(), int(s.Uid), int(req.Gid)); err != nil {
 				return translateError(err)
 			}
 		}
@@ -521,7 +593,7 @@ func (n *Node) Setattr(ctx context.Context,
 		return translateError(err)
 	}
 
-	fi, err := os.Stat(n.realPath)
+	fi, err := os.Stat(n.getRealPath())
 	if err != nil {
 		return translateError(err)
 	}
@@ -537,15 +609,16 @@ var _ fs.NodeRenamer = (*Node)(nil)
 func (n *Node) Rename(ctx context.Context,
 	req *fuse.RenameRequest, newDir fs.Node) (err error) {
 	time.Sleep(latency)
-	np := filepath.Join(newDir.(*Node).realPath, req.NewName)
-	op := filepath.Join(n.realPath, req.OldName)
+	np := filepath.Join(newDir.(*Node).getRealPath(), req.NewName)
+	op := filepath.Join(n.getRealPath(), req.OldName)
 	defer func() {
 		log.Printf("%s.Rename(%s->%s): error=%v",
-			n.realPath, op, np, err)
+			n.getRealPath(), op, np, err)
 	}()
 	defer func() {
 		if err == nil {
 			n.fs.moveAllxattrs(ctx, op, np)
+			n.fs.nodeRenamed(op, np)
 		}
 	}()
 	return os.Rename(op, np)
@@ -562,11 +635,11 @@ func (n *Node) Getxattr(ctx context.Context,
 	}
 
 	defer func() {
-		log.Printf("%s.Getxattr(%s): error=%v", n.realPath, req.Name, err)
+		log.Printf("%s.Getxattr(%s): error=%v", n.getRealPath(), req.Name, err)
 	}()
 	n.fs.xlock.RLock()
 	defer n.fs.xlock.RUnlock()
-	if x := n.fs.xattrs[n.realPath]; x != nil {
+	if x := n.fs.xattrs[n.getRealPath()]; x != nil {
 
 		var ok bool
 		resp.Xattr, ok = x[req.Name]
@@ -589,11 +662,11 @@ func (n *Node) Listxattr(ctx context.Context,
 
 	defer func() {
 		log.Printf("%s.Listxattr(%d,%d): error=%v",
-			n.realPath, req.Position, req.Size, err)
+			n.getRealPath(), req.Position, req.Size, err)
 	}()
 	n.fs.xlock.RLock()
 	defer n.fs.xlock.RUnlock()
-	if x := n.fs.xattrs[n.realPath]; x != nil {
+	if x := n.fs.xattrs[n.getRealPath()]; x != nil {
 		names := make([]string, 0)
 		for k := range x {
 			names = append(names, k)
@@ -628,17 +701,17 @@ func (n *Node) Setxattr(ctx context.Context,
 	}
 
 	defer func() {
-		log.Printf("%s.Setxattr(%s): error=%v", n.realPath, req.Name, err)
+		log.Printf("%s.Setxattr(%s): error=%v", n.getRealPath(), req.Name, err)
 	}()
 	n.fs.xlock.Lock()
 	defer n.fs.xlock.Unlock()
-	if n.fs.xattrs[n.realPath] == nil {
-		n.fs.xattrs[n.realPath] = make(map[string][]byte)
+	if n.fs.xattrs[n.getRealPath()] == nil {
+		n.fs.xattrs[n.getRealPath()] = make(map[string][]byte)
 	}
 	buf := make([]byte, len(req.Xattr))
 	copy(buf, req.Xattr)
 
-	n.fs.xattrs[n.realPath][req.Name] = buf
+	n.fs.xattrs[n.getRealPath()][req.Name] = buf
 	return nil
 }
 
@@ -653,14 +726,14 @@ func (n *Node) Removexattr(ctx context.Context,
 	}
 
 	defer func() {
-		log.Printf("%s.Removexattr(%s): error=%v", n.realPath, req.Name, err)
+		log.Printf("%s.Removexattr(%s): error=%v", n.getRealPath(), req.Name, err)
 	}()
 	n.fs.xlock.Lock()
 	defer n.fs.xlock.Unlock()
 
 	name := req.Name
 
-	if x := n.fs.xattrs[n.realPath]; x != nil {
+	if x := n.fs.xattrs[n.getRealPath()]; x != nil {
 		var ok bool
 		_, ok = x[name]
 		if ok {
@@ -669,4 +742,11 @@ func (n *Node) Removexattr(ctx context.Context,
 		}
 	}
 	return fuse.ENOATTR
+}
+
+var _ fs.NodeForgetter = (*Node)(nil)
+
+// Forget implements fs.NodeForgetter interface for *Node
+func (n *Node) Forget() {
+	n.fs.forgetNode(n)
 }
