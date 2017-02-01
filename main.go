@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strconv"
+	"sync"
 	"time"
 
 	"bazil.org/fuse"
@@ -32,7 +34,8 @@ func init() {
 
 func usage() {
 	fmt.Fprintf(os.Stderr, "Usage of %s:\n", os.Args[0])
-	fmt.Fprintf(os.Stderr, "  %s ROOT MOUNTPOINT\n", os.Args[0])
+	fmt.Fprintf(os.Stderr, "  %s ROOT MOUNTPOINT [[ROOT MOUNTPOINT] ...]\n",
+		os.Args[0])
 	flag.PrintDefaults()
 }
 
@@ -40,35 +43,44 @@ func main() {
 	flag.Usage = usage
 	flag.Parse()
 
-	if flag.NArg() != 2 {
+	if flag.NArg() < 2 || flag.NArg()%2 != 0 {
 		usage()
 		os.Exit(2)
 	}
-	mountpoint := flag.Arg(1)
 
-	c, err := fuse.Mount(
-		mountpoint,
-		fuse.FSName("loopback"),
-		fuse.Subtype("loopback-fs"),
-		fuse.VolumeName("goLoopback"),
-		fuse.AllowRoot(),
-	)
-	if err != nil {
-		log.Fatal(err)
+	wg := new(sync.WaitGroup)
+	for i := 0; i < flag.NArg(); i += 2 {
+		mountpoint := flag.Arg(i + 1)
+
+		c, err := fuse.Mount(
+			mountpoint,
+			fuse.FSName("loopback"),
+			fuse.Subtype("loopback-fs"),
+			fuse.VolumeName("goLoopback"+strconv.Itoa(i/2)),
+			fuse.AllowRoot(),
+		)
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer c.Close()
+
+		// check if the mount process has an error to report
+		<-c.Ready
+		if err := c.MountError; err != nil {
+			log.Fatal(err)
+		}
+
+		log.Println("mounted!")
+
+		wg.Add(1)
+		go func(c *fuse.Conn, i int) {
+			err = fs.Serve(c, newFS(flag.Arg(i)))
+			if err != nil {
+				log.Fatalf("fs.Serve error: %v\n", err)
+			}
+			wg.Done()
+		}(c, i)
 	}
-	defer c.Close()
 
-	// check if the mount process has an error to report
-	<-c.Ready
-	if err := c.MountError; err != nil {
-		log.Fatal(err)
-	}
-
-	log.Println("mounted!")
-
-	err = fs.Serve(c, newFS(flag.Arg(0)))
-	if err != nil {
-		log.Fatal(err)
-	}
-
+	wg.Wait()
 }
