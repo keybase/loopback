@@ -65,6 +65,15 @@ func (f *FS) newNode(n *Node) {
 	f.nodes[rp] = append(f.nodes[rp], n)
 }
 
+func (f *FS) nodeByPath(rp string) (n *Node) {
+	f.nlock.Lock()
+	defer f.nlock.Unlock()
+	if len(f.nodes[rp]) > 0 {
+		return f.nodes[rp][0]
+	}
+	return nil
+}
+
 func (f *FS) nodeRenamed(oldPath string, newPath string) {
 	f.nlock.Lock()
 	defer f.nlock.Unlock()
@@ -338,7 +347,11 @@ func (n *Node) Lookup(ctx context.Context,
 		return nil, translateError(err)
 	}
 
-	var nn *Node
+	nn := n.fs.nodeByPath(p)
+	if nn != nil {
+		return nn, nil
+	}
+
 	if fi.IsDir() {
 		nn = &Node{realPath: p, isDir: true, fs: n.fs}
 	} else {
