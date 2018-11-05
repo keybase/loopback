@@ -7,7 +7,6 @@
 package main
 
 import (
-	"io/ioutil"
 	"log"
 	"os"
 	"path/filepath"
@@ -145,121 +144,6 @@ func (f *FS) moveAllxattrs(ctx context.Context, from string, to string) {
 	}
 }
 
-// Handle represent an open file or directory
-type Handle struct {
-	fs        *FS
-	reopener  func() (*os.File, error)
-	forgetter func()
-
-	f *os.File
-}
-
-var _ fs.HandleFlusher = (*Handle)(nil)
-
-// Flush implements fs.HandleFlusher interface for *Handle
-func (h *Handle) Flush(ctx context.Context,
-	req *fuse.FlushRequest) (err error) {
-	time.Sleep(latency)
-	defer func() { log.Printf("Handle(%s).Flush(): error=%v", h.f.Name(), err) }()
-	return h.f.Sync()
-}
-
-var _ fs.HandleReadAller = (*Handle)(nil)
-
-// ReadAll implements fs.HandleReadAller interface for *Handle
-func (h *Handle) ReadAll(ctx context.Context) (d []byte, err error) {
-	time.Sleep(latency)
-	defer func() {
-		log.Printf("Handle(%s).ReadAll(): error=%v",
-			h.f.Name(), err)
-	}()
-	return ioutil.ReadAll(h.f)
-}
-
-var _ fs.HandleReadDirAller = (*Handle)(nil)
-
-// ReadDirAll implements fs.HandleReadDirAller interface for *Handle
-func (h *Handle) ReadDirAll(ctx context.Context) (
-	dirs []fuse.Dirent, err error) {
-	time.Sleep(latency)
-	defer func() {
-		log.Printf("Handle(%s).ReadDirAll(): %#+v error=%v",
-			h.f.Name(), dirs, err)
-	}()
-	fis, err := h.f.Readdir(0)
-	if err != nil {
-		return nil, translateError(err)
-	}
-
-	// Readdir() reads up the entire dir stream but never resets the pointer.
-	// Consequently, when Readdir is called again on the same *File, it gets
-	// nothing. As a result, we need to close the file descriptor and re-open it
-	// so next call would work.
-	if err = h.f.Close(); err != nil {
-		return nil, translateError(err)
-	}
-	if h.f, err = h.reopener(); err != nil {
-		return nil, translateError(err)
-	}
-
-	return getDirentsWithFileInfos(fis), nil
-}
-
-var _ fs.HandleReader = (*Handle)(nil)
-
-// Read implements fs.HandleReader interface for *Handle
-func (h *Handle) Read(ctx context.Context,
-	req *fuse.ReadRequest, resp *fuse.ReadResponse) (err error) {
-	time.Sleep(latency)
-	defer func() {
-		log.Printf("Handle(%s).Read(): error=%v",
-			h.f.Name(), err)
-	}()
-
-	if _, err = h.f.Seek(req.Offset, 0); err != nil {
-		return translateError(err)
-	}
-	resp.Data = make([]byte, req.Size)
-	n, err := h.f.Read(resp.Data)
-	resp.Data = resp.Data[:n]
-	return translateError(err)
-}
-
-var _ fs.HandleReleaser = (*Handle)(nil)
-
-// Release implements fs.HandleReleaser interface for *Handle
-func (h *Handle) Release(ctx context.Context,
-	req *fuse.ReleaseRequest) (err error) {
-	time.Sleep(latency)
-	defer func() {
-		log.Printf("Handle(%s).Release(): error=%v",
-			h.f.Name(), err)
-	}()
-	if h.forgetter != nil {
-		h.forgetter()
-	}
-	return h.f.Close()
-}
-
-var _ fs.HandleWriter = (*Handle)(nil)
-
-// Write implements fs.HandleWriter interface for *Handle
-func (h *Handle) Write(ctx context.Context,
-	req *fuse.WriteRequest, resp *fuse.WriteResponse) (err error) {
-	time.Sleep(latency)
-	defer func() {
-		log.Printf("Handle(%s).Write(): error=%v",
-			h.f.Name(), err)
-	}()
-
-	if _, err = h.f.Seek(req.Offset, 0); err != nil {
-		return translateError(err)
-	}
-	n, err := h.f.Write(req.Data)
-	resp.Size = n
-	return translateError(err)
-}
-
 // Node is the node for both directories and files
 type Node struct {
 	fs *FS
@@ -269,8 +153,7 @@ type Node struct {
 
 	isDir bool
 
-	lock     sync.RWMutex
-	flushers map[*Handle]bool
+	lock sync.RWMutex
 }
 
 func (n *Node) getRealPath() string {
@@ -283,6 +166,80 @@ func (n *Node) updateRealPath(realPath string) {
 	n.rpLock.Lock()
 	defer n.rpLock.Unlock()
 	n.realPath = realPath
+}
+
+var _ fs.HandleReadDirAller = (*Node)(nil)
+
+// ReadDirAll implements fs.HandleReadDirAller interface for *Node
+func (n *Node) ReadDirAll(ctx context.Context) (
+	dirs []fuse.Dirent, err error) {
+	time.Sleep(latency)
+	defer func() {
+		log.Printf("Node(%s).ReadDirAll(): %#+v error=%v",
+			n.getRealPath(), dirs, err)
+	}()
+	f, err := os.Open(n.getRealPath())
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	fis, err := f.Readdir(0)
+	if err != nil {
+		return nil, translateError(err)
+	}
+	return getDirentsWithFileInfos(fis), nil
+}
+
+var _ fs.HandleReader = (*Node)(nil)
+
+// Read implements fs.HandleReader interface for *Node
+func (n *Node) Read(ctx context.Context,
+	req *fuse.ReadRequest, resp *fuse.ReadResponse) (err error) {
+	time.Sleep(latency)
+	defer func() {
+		log.Printf("Node(%s).Read(): error=%v",
+			n.getRealPath(), err)
+	}()
+
+	f, err := os.Open(n.getRealPath())
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	if _, err = f.Seek(req.Offset, 0); err != nil {
+		return translateError(err)
+	}
+	resp.Data = make([]byte, req.Size)
+	nRead, err := f.Read(resp.Data)
+	resp.Data = resp.Data[:nRead]
+	return translateError(err)
+}
+
+var _ fs.HandleWriter = (*Node)(nil)
+
+// Write implements fs.HandleWriter interface for *Node
+func (n *Node) Write(ctx context.Context,
+	req *fuse.WriteRequest, resp *fuse.WriteResponse) (err error) {
+	time.Sleep(latency)
+	defer func() {
+		log.Printf("Node(%s).Write(): error=%v",
+			n.getRealPath(), err)
+	}()
+
+	f, err := os.OpenFile(n.getRealPath(), os.O_RDWR, 0600)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	if _, err = f.Seek(req.Offset, 0); err != nil {
+		return translateError(err)
+	}
+	nRead, err := f.Write(req.Data)
+	resp.Size = nRead
+	return translateError(err)
 }
 
 var _ fs.NodeAccesser = (*Node)(nil)
@@ -401,53 +358,6 @@ func fuseOpenFlagsToOSFlagsAndPerms(
 	return flag, perm
 }
 
-func (n *Node) rememberHandle(h *Handle) {
-	n.lock.Lock()
-	defer n.lock.Unlock()
-	if n.flushers == nil {
-		n.flushers = make(map[*Handle]bool)
-	}
-	n.flushers[h] = true
-}
-
-func (n *Node) forgetHandle(h *Handle) {
-	n.lock.Lock()
-	defer n.lock.Unlock()
-	if n.flushers == nil {
-		return
-	}
-	delete(n.flushers, h)
-}
-
-var _ fs.NodeOpener = (*Node)(nil)
-
-// Open implements fs.NodeOpener interface for *Node
-func (n *Node) Open(ctx context.Context,
-	req *fuse.OpenRequest, resp *fuse.OpenResponse) (h fs.Handle, err error) {
-	time.Sleep(latency)
-	flags, perm := fuseOpenFlagsToOSFlagsAndPerms(req.Flags)
-	defer func() {
-		log.Printf("%s.Open(): %o %o error=%v",
-			n.getRealPath(), flags, perm, err)
-	}()
-
-	opener := func() (*os.File, error) {
-		return os.OpenFile(n.getRealPath(), flags, perm)
-	}
-
-	f, err := opener()
-	if err != nil {
-		return nil, translateError(err)
-	}
-
-	handle := &Handle{fs: n.fs, f: f, reopener: opener}
-	n.rememberHandle(handle)
-	handle.forgetter = func() {
-		n.forgetHandle(handle)
-	}
-	return handle, nil
-}
-
 var _ fs.NodeCreater = (*Node)(nil)
 
 // Create implements fs.NodeCreater interface for *Node
@@ -471,19 +381,13 @@ func (n *Node) Create(
 		return nil, nil, translateError(err)
 	}
 
-	h := &Handle{fs: n.fs, f: f, reopener: opener}
-
 	node := &Node{
 		realPath: filepath.Join(n.getRealPath(), req.Name),
 		isDir:    req.Mode.IsDir(),
 		fs:       n.fs,
 	}
-	node.rememberHandle(h)
-	h.forgetter = func() {
-		node.forgetHandle(h)
-	}
 	n.fs.newNode(node)
-	return node, h, nil
+	return node, node, nil
 }
 
 var _ fs.NodeMkdirer = (*Node)(nil)
@@ -523,12 +427,7 @@ var _ fs.NodeFsyncer = (*Node)(nil)
 func (n *Node) Fsync(ctx context.Context, req *fuse.FsyncRequest) (err error) {
 	time.Sleep(latency)
 	defer func() { log.Printf("%s.Fsync(): error=%v", n.getRealPath(), err) }()
-	n.lock.RLock()
-	defer n.lock.RUnlock()
-	for h := range n.flushers {
-		return h.f.Sync()
-	}
-	return fuse.EIO
+	return nil
 }
 
 var _ fs.NodeSetattrer = (*Node)(nil)
