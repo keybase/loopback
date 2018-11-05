@@ -372,10 +372,6 @@ func (n *Node) Create(
 			n.getRealPath(), name, flags, req.Mode, err)
 	}()
 
-	opener := func() (f *os.File, err error) {
-		return os.OpenFile(name, flags, req.Mode)
-	}
-
 	node := &Node{
 		realPath: filepath.Join(n.getRealPath(), req.Name),
 		isDir:    req.Mode.IsDir(),
