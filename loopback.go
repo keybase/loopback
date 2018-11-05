@@ -377,6 +377,12 @@ func (n *Node) Create(
 		isDir:    req.Mode.IsDir(),
 		fs:       n.fs,
 	}
+
+	f, err := os.Create(node.realPath)
+	if err != nil {
+		return nil, nil, err
+	}
+
 	n.fs.newNode(node)
 	return node, node, nil
 }
