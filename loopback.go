@@ -382,6 +382,7 @@ func (n *Node) Create(
 	if err != nil {
 		return nil, nil, err
 	}
+	defer f.Close()
 
 	n.fs.newNode(node)
 	return node, node, nil
